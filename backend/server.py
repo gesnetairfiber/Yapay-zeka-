@@ -1141,6 +1141,136 @@ async def delete_device(device_id: str, current_user: AdminUser = Depends(get_cu
         raise HTTPException(status_code=404, detail="Device not found")
     return {"message": "Device deleted successfully"}
 
+# ==================== RADIUS & MIKROTIK ROUTES ====================
+
+@api_router.get("/radius/active-sessions")
+async def get_active_radius_sessions(current_user: AdminUser = Depends(get_current_user)):
+    """Get all active RADIUS sessions"""
+    if not RADIUS_ENABLED or not radius_client:
+        raise HTTPException(status_code=503, detail="RADIUS integration not enabled")
+    
+    try:
+        sessions = radius_client.get_active_sessions()
+        return {"sessions": sessions, "count": len(sessions)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get active sessions: {str(e)}")
+
+@api_router.get("/radius/user-accounting/{username}")
+async def get_user_radius_accounting(username: str, days: int = 30, current_user: AdminUser = Depends(get_current_user)):
+    """Get RADIUS accounting data for a user"""
+    if not RADIUS_ENABLED or not radius_client:
+        raise HTTPException(status_code=503, detail="RADIUS integration not enabled")
+    
+    try:
+        accounting = radius_client.get_user_accounting(username, days)
+        if not accounting:
+            raise HTTPException(status_code=404, detail="No accounting data found")
+        
+        # Convert bytes to GB for readability
+        accounting['data_usage_gb'] = {
+            'download': round(accounting['bytes_out'] / (1024**3), 2),
+            'upload': round(accounting['bytes_in'] / (1024**3), 2),
+            'total': round((accounting['bytes_in'] + accounting['bytes_out']) / (1024**3), 2)
+        }
+        
+        return accounting
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get accounting data: {str(e)}")
+
+@api_router.post("/mikrotik/disconnect/{username}")
+async def disconnect_mikrotik_user(username: str, service_type: str = "pppoe", current_user: AdminUser = Depends(get_current_user)):
+    """Disconnect user from Mikrotik (PPPoE or Hotspot)"""
+    if not MIKROTIK_ENABLED or not mikrotik_client:
+        raise HTTPException(status_code=503, detail="Mikrotik integration not enabled")
+    
+    try:
+        if service_type.lower() == "pppoe":
+            success = mikrotik_client.disconnect_pppoe_user(username)
+        elif service_type.lower() == "hotspot":
+            success = mikrotik_client.disconnect_hotspot_user(username)
+        else:
+            raise HTTPException(status_code=400, detail="Invalid service_type. Use 'pppoe' or 'hotspot'")
+        
+        if success:
+            return {"message": f"Successfully disconnected user {username}"}
+        else:
+            raise HTTPException(status_code=404, detail=f"User {username} not found in active sessions")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to disconnect user: {str(e)}")
+
+@api_router.get("/mikrotik/active-connections")
+async def get_mikrotik_active_connections(service_type: str = "pppoe", current_user: AdminUser = Depends(get_current_user)):
+    """Get active connections from Mikrotik"""
+    if not MIKROTIK_ENABLED or not mikrotik_client:
+        raise HTTPException(status_code=503, detail="Mikrotik integration not enabled")
+    
+    try:
+        if service_type.lower() == "pppoe":
+            connections = mikrotik_client.get_pppoe_active_connections()
+        elif service_type.lower() == "hotspot":
+            connections = mikrotik_client.get_hotspot_active_users()
+        else:
+            raise HTTPException(status_code=400, detail="Invalid service_type. Use 'pppoe' or 'hotspot'")
+        
+        return {"connections": connections, "count": len(connections)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get connections: {str(e)}")
+
+@api_router.get("/mikrotik/system-resources")
+async def get_mikrotik_system_resources(current_user: AdminUser = Depends(get_current_user)):
+    """Get Mikrotik router system resources"""
+    if not MIKROTIK_ENABLED or not mikrotik_client:
+        raise HTTPException(status_code=503, detail="Mikrotik integration not enabled")
+    
+    try:
+        resources = mikrotik_client.get_system_resources()
+        if not resources:
+            raise HTTPException(status_code=500, detail="Failed to get system resources")
+        return resources
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get system resources: {str(e)}")
+
+@api_router.get("/integration/status")
+async def get_integration_status(current_user: AdminUser = Depends(get_current_user)):
+    """Get RADIUS and Mikrotik integration status"""
+    status = {
+        "radius": {
+            "enabled": RADIUS_ENABLED,
+            "connected": False
+        },
+        "mikrotik": {
+            "enabled": MIKROTIK_ENABLED,
+            "connected": False
+        }
+    }
+    
+    # Test RADIUS connection
+    if RADIUS_ENABLED and radius_client:
+        try:
+            conn = radius_client._get_connection()
+            if conn:
+                status["radius"]["connected"] = True
+                conn.close()
+        except:
+            pass
+    
+    # Test Mikrotik connection
+    if MIKROTIK_ENABLED and mikrotik_client:
+        try:
+            status["mikrotik"]["connected"] = mikrotik_client.test_connection()
+        except:
+            pass
+    
+    return status
+
 # ==================== INCLUDE ROUTER ====================
 
 app.include_router(api_router)
