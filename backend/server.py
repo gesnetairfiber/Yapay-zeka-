@@ -13,6 +13,10 @@ import bcrypt
 from pathlib import Path
 import uuid
 
+# Import RADIUS and Mikrotik clients
+from radius_client import RadiusClient
+from mikrotik_client import MikrotikClient
+
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
@@ -25,6 +29,40 @@ db = client[os.environ['DB_NAME']]
 SECRET_KEY = os.environ.get('JWT_SECRET_KEY', 'your-secret-key-change-in-production')
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 480  # 8 hours
+
+# Initialize RADIUS Client (optional - only if FreeRADIUS is configured)
+RADIUS_ENABLED = os.environ.get('RADIUS_ENABLED', 'false').lower() == 'true'
+radius_client = None
+
+if RADIUS_ENABLED:
+    try:
+        radius_client = RadiusClient(
+            host=os.environ.get('RADIUS_HOST', 'localhost'),
+            user=os.environ.get('RADIUS_USER', 'radius'),
+            password=os.environ.get('RADIUS_PASSWORD', ''),
+            database=os.environ.get('RADIUS_DB', 'radius')
+        )
+        logging.info("RADIUS client initialized successfully")
+    except Exception as e:
+        logging.error(f"Failed to initialize RADIUS client: {e}")
+        radius_client = None
+
+# Initialize Mikrotik Client (optional - only if Mikrotik is configured)
+MIKROTIK_ENABLED = os.environ.get('MIKROTIK_ENABLED', 'false').lower() == 'true'
+mikrotik_client = None
+
+if MIKROTIK_ENABLED:
+    try:
+        mikrotik_client = MikrotikClient(
+            ip=os.environ.get('MIKROTIK_HOST', '192.168.1.1'),
+            username=os.environ.get('MIKROTIK_USER', 'admin'),
+            password=os.environ.get('MIKROTIK_PASSWORD', ''),
+            port=int(os.environ.get('MIKROTIK_PORT', '443'))
+        )
+        logging.info("Mikrotik client initialized successfully")
+    except Exception as e:
+        logging.error(f"Failed to initialize Mikrotik client: {e}")
+        mikrotik_client = None
 
 # Create the main app
 app = FastAPI(title="WiRadius ISP CRM API")
