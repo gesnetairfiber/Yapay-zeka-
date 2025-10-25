@@ -897,6 +897,190 @@ async def create_direct_payment(payment: DirectPaymentCreate, current_user: Admi
     
     return payment_obj
 
+# ==================== DEVICE ROUTES ====================
+
+@api_router.get("/devices", response_model=List[Device])
+async def get_devices(
+    search: Optional[str] = None,
+    status: Optional[str] = None,
+    device_type: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 100,
+    current_user: AdminUser = Depends(get_current_user)
+):
+    """Get devices list with search and filters"""
+    query = {}
+    
+    if search:
+        query["$or"] = [
+            {"brand": {"$regex": search, "$options": "i"}},
+            {"model": {"$regex": search, "$options": "i"}},
+            {"serial_number": {"$regex": search, "$options": "i"}},
+            {"mac_address": {"$regex": search, "$options": "i"}}
+        ]
+    
+    if status:
+        query["status"] = status
+    
+    if device_type:
+        query["device_type"] = device_type
+    
+    devices = await db.devices.find(query, {"_id": 0}).skip(skip).limit(limit).to_list(None)
+    
+    # Convert datetime strings
+    for device in devices:
+        for field in ['assigned_date', 'purchase_date', 'created_at', 'updated_at']:
+            if device.get(field) and isinstance(device[field], str):
+                device[field] = datetime.fromisoformat(device[field])
+    
+    return devices
+
+@api_router.post("/devices", response_model=Device)
+async def create_device(device: DeviceCreate, current_user: AdminUser = Depends(get_current_user)):
+    """Create new device"""
+    # Check if serial number exists
+    existing = await db.devices.find_one({"serial_number": device.serial_number})
+    if existing:
+        raise HTTPException(status_code=400, detail="Serial number already exists")
+    
+    device_obj = Device(**device.model_dump())
+    
+    doc = device_obj.model_dump()
+    for field in ['assigned_date', 'purchase_date', 'created_at', 'updated_at']:
+        if doc.get(field):
+            doc[field] = doc[field].isoformat()
+    
+    await db.devices.insert_one(doc)
+    return device_obj
+
+@api_router.get("/devices/{device_id}", response_model=Device)
+async def get_device(device_id: str, current_user: AdminUser = Depends(get_current_user)):
+    """Get device details"""
+    device = await db.devices.find_one({"id": device_id}, {"_id": 0})
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    
+    # Convert datetime strings
+    for field in ['assigned_date', 'purchase_date', 'created_at', 'updated_at']:
+        if device.get(field) and isinstance(device[field], str):
+            device[field] = datetime.fromisoformat(device[field])
+    
+    return Device(**device)
+
+@api_router.put("/devices/{device_id}", response_model=Device)
+async def update_device(
+    device_id: str,
+    device_update: DeviceUpdate,
+    current_user: AdminUser = Depends(get_current_user)
+):
+    """Update device"""
+    existing = await db.devices.find_one({"id": device_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Device not found")
+    
+    update_data = device_update.model_dump(exclude_unset=True)
+    update_data['updated_at'] = datetime.now(timezone.utc).isoformat()
+    
+    # Convert datetime to ISO string
+    if 'purchase_date' in update_data and update_data['purchase_date']:
+        update_data['purchase_date'] = update_data['purchase_date'].isoformat()
+    
+    await db.devices.update_one({"id": device_id}, {"$set": update_data})
+    
+    # Get updated device
+    updated = await db.devices.find_one({"id": device_id}, {"_id": 0})
+    
+    # Convert datetime strings
+    for field in ['assigned_date', 'purchase_date', 'created_at', 'updated_at']:
+        if updated.get(field) and isinstance(updated[field], str):
+            updated[field] = datetime.fromisoformat(updated[field])
+    
+    return Device(**updated)
+
+@api_router.post("/devices/{device_id}/assign", response_model=Device)
+async def assign_device(
+    device_id: str,
+    assignment: DeviceAssign,
+    current_user: AdminUser = Depends(get_current_user)
+):
+    """Assign device to customer"""
+    device = await db.devices.find_one({"id": device_id}, {"_id": 0})
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    
+    if device['status'] != 'in_stock':
+        raise HTTPException(status_code=400, detail="Device is not available")
+    
+    customer = await db.customers.find_one({"id": assignment.customer_id}, {"_id": 0})
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    
+    # Update device
+    await db.devices.update_one(
+        {"id": device_id},
+        {"$set": {
+            "status": "assigned",
+            "customer_id": assignment.customer_id,
+            "customer_name": f"{customer['first_name']} {customer['last_name']}",
+            "assigned_date": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }}
+    )
+    
+    # Get updated device
+    updated = await db.devices.find_one({"id": device_id}, {"_id": 0})
+    
+    # Convert datetime strings
+    for field in ['assigned_date', 'purchase_date', 'created_at', 'updated_at']:
+        if updated.get(field) and isinstance(updated[field], str):
+            updated[field] = datetime.fromisoformat(updated[field])
+    
+    return Device(**updated)
+
+@api_router.post("/devices/{device_id}/unassign", response_model=Device)
+async def unassign_device(device_id: str, current_user: AdminUser = Depends(get_current_user)):
+    """Unassign device from customer"""
+    device = await db.devices.find_one({"id": device_id}, {"_id": 0})
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    
+    # Update device
+    await db.devices.update_one(
+        {"id": device_id},
+        {"$set": {
+            "status": "in_stock",
+            "customer_id": None,
+            "customer_name": None,
+            "assigned_date": None,
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }}
+    )
+    
+    # Get updated device
+    updated = await db.devices.find_one({"id": device_id}, {"_id": 0})
+    
+    # Convert datetime strings
+    for field in ['assigned_date', 'purchase_date', 'created_at', 'updated_at']:
+        if updated.get(field) and isinstance(updated[field], str):
+            updated[field] = datetime.fromisoformat(updated[field])
+    
+    return Device(**updated)
+
+@api_router.delete("/devices/{device_id}")
+async def delete_device(device_id: str, current_user: AdminUser = Depends(get_current_user)):
+    """Delete device"""
+    device = await db.devices.find_one({"id": device_id}, {"_id": 0})
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    
+    if device['status'] == 'assigned':
+        raise HTTPException(status_code=400, detail="Cannot delete assigned device")
+    
+    result = await db.devices.delete_one({"id": device_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Device not found")
+    return {"message": "Device deleted successfully"}
+
 # ==================== INCLUDE ROUTER ====================
 
 app.include_router(api_router)
