@@ -58,4 +58,18 @@ export const packageAPI = {
   delete: (id) => api.delete(`/packages/${id}`),
 };
 
+export const invoiceAPI = {
+  getAll: (params) => api.get('/invoices', { params }),
+  getById: (id) => api.get(`/invoices/${id}`),
+  create: (data) => api.post('/invoices', data),
+  update: (id, data) => api.put(`/invoices/${id}`, data),
+  pay: (id, data) => api.post(`/invoices/${id}/pay`, data),
+  cancel: (id) => api.delete(`/invoices/${id}`),
+};
+
+export const paymentAPI = {
+  getAll: (params) => api.get('/payments', { params }),
+  create: (data) => api.post('/payments', data),
+};
+
 export default api;
