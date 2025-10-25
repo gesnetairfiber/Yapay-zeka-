@@ -72,4 +72,14 @@ export const paymentAPI = {
   create: (data) => api.post('/payments', data),
 };
 
+export const deviceAPI = {
+  getAll: (params) => api.get('/devices', { params }),
+  getById: (id) => api.get(`/devices/${id}`),
+  create: (data) => api.post('/devices', data),
+  update: (id, data) => api.put(`/devices/${id}`, data),
+  assign: (id, data) => api.post(`/devices/${id}/assign`, data),
+  unassign: (id) => api.post(`/devices/${id}/unassign`),
+  delete: (id) => api.delete(`/devices/${id}`),
+};
+
 export default api;
