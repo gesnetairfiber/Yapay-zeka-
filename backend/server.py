@@ -378,12 +378,34 @@ async def create_customer(customer: CustomerCreate, current_user: AdminUser = De
     count = await db.customers.count_documents({})
     customer_number = f"ABN{str(count + 1).zfill(6)}"
     
-    # Get package name if package_id provided
+    # Get package details if package_id provided
     package_name = None
+    radius_group = "default_users"
+    bandwidth_limit = "5M/10M"  # Default limit
+    
     if customer.package_id:
         package = await db.packages.find_one({"id": customer.package_id}, {"_id": 0})
         if package:
             package_name = package['name']
+            radius_group = f"package_{package['id']}"
+            bandwidth_limit = f"{package['upload_speed']}M/{package['download_speed']}M"
+    
+    # Add to RADIUS if enabled
+    if RADIUS_ENABLED and radius_client:
+        try:
+            success = radius_client.add_user(
+                username=customer.radius_username,
+                password=customer.radius_password,
+                group=radius_group
+            )
+            if success:
+                # Set bandwidth limit
+                radius_client.set_bandwidth_limit(customer.radius_username, bandwidth_limit)
+                logging.info(f"Added customer {customer.radius_username} to RADIUS with group {radius_group}")
+            else:
+                logging.warning(f"Failed to add customer {customer.radius_username} to RADIUS")
+        except Exception as e:
+            logging.error(f"RADIUS integration error for {customer.radius_username}: {e}")
     
     # Create customer object
     customer_dict = customer.model_dump()
