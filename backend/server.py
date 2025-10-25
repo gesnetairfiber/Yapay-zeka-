@@ -521,6 +521,338 @@ async def delete_package(package_id: str, current_user: AdminUser = Depends(get_
         raise HTTPException(status_code=404, detail="Package not found")
     return {"message": "Package deleted successfully"}
 
+# ==================== INVOICE & PAYMENT MODELS ====================
+
+class Invoice(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    invoice_number: str
+    customer_id: str
+    customer_name: str
+    customer_phone: str
+    package_id: Optional[str] = None
+    package_name: Optional[str] = None
+    amount: float
+    issue_date: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    due_date: datetime
+    status: str = "unpaid"  # unpaid, paid, overdue, cancelled
+    payment_date: Optional[datetime] = None
+    payment_method: Optional[str] = None
+    notes: Optional[str] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+class InvoiceCreate(BaseModel):
+    customer_id: str
+    package_id: Optional[str] = None
+    amount: float
+    due_date: datetime
+    notes: Optional[str] = None
+
+class InvoiceUpdate(BaseModel):
+    amount: Optional[float] = None
+    due_date: Optional[datetime] = None
+    status: Optional[str] = None
+    notes: Optional[str] = None
+
+class PaymentCreate(BaseModel):
+    invoice_id: str
+    payment_method: str  # cash, credit_card, bank_transfer
+    notes: Optional[str] = None
+
+class Payment(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    customer_id: str
+    customer_name: str
+    invoice_id: Optional[str] = None
+    invoice_number: Optional[str] = None
+    amount: float
+    payment_method: str
+    payment_date: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    notes: Optional[str] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+class DirectPaymentCreate(BaseModel):
+    customer_id: str
+    amount: float
+    payment_method: str
+    notes: Optional[str] = None
+
+# ==================== INVOICE ROUTES ====================
+
+@api_router.get("/invoices", response_model=List[Invoice])
+async def get_invoices(
+    search: Optional[str] = None,
+    status: Optional[str] = None,
+    customer_id: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 50,
+    current_user: AdminUser = Depends(get_current_user)
+):
+    """Get invoices list with search and filters"""
+    query = {}
+    
+    if search:
+        query["$or"] = [
+            {"invoice_number": {"$regex": search, "$options": "i"}},
+            {"customer_name": {"$regex": search, "$options": "i"}},
+            {"customer_phone": {"$regex": search, "$options": "i"}}
+        ]
+    
+    if status:
+        query["status"] = status
+    
+    if customer_id:
+        query["customer_id"] = customer_id
+    
+    invoices = await db.invoices.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(limit).to_list(None)
+    
+    # Convert datetime strings
+    for invoice in invoices:
+        for field in ['issue_date', 'due_date', 'payment_date', 'created_at', 'updated_at']:
+            if invoice.get(field) and isinstance(invoice[field], str):
+                invoice[field] = datetime.fromisoformat(invoice[field])
+    
+    return invoices
+
+@api_router.post("/invoices", response_model=Invoice)
+async def create_invoice(invoice: InvoiceCreate, current_user: AdminUser = Depends(get_current_user)):
+    """Create new invoice"""
+    # Get customer info
+    customer = await db.customers.find_one({"id": invoice.customer_id}, {"_id": 0})
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    
+    # Generate invoice number
+    count = await db.invoices.count_documents({})
+    invoice_number = f"FAT{str(count + 1).zfill(6)}"
+    
+    # Get package info if provided
+    package_name = None
+    if invoice.package_id:
+        package = await db.packages.find_one({"id": invoice.package_id}, {"_id": 0})
+        if package:
+            package_name = package['name']
+    
+    # Create invoice
+    invoice_dict = invoice.model_dump()
+    invoice_obj = Invoice(
+        **invoice_dict,
+        invoice_number=invoice_number,
+        customer_name=f"{customer['first_name']} {customer['last_name']}",
+        customer_phone=customer['phone'],
+        package_name=package_name
+    )
+    
+    doc = invoice_obj.model_dump()
+    for field in ['issue_date', 'due_date', 'payment_date', 'created_at', 'updated_at']:
+        if doc.get(field):
+            doc[field] = doc[field].isoformat()
+    
+    await db.invoices.insert_one(doc)
+    
+    # Update customer balance
+    await db.customers.update_one(
+        {"id": invoice.customer_id},
+        {"$inc": {"balance": -invoice.amount}}
+    )
+    
+    return invoice_obj
+
+@api_router.get("/invoices/{invoice_id}", response_model=Invoice)
+async def get_invoice(invoice_id: str, current_user: AdminUser = Depends(get_current_user)):
+    """Get invoice details"""
+    invoice = await db.invoices.find_one({"id": invoice_id}, {"_id": 0})
+    if not invoice:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    
+    # Convert datetime strings
+    for field in ['issue_date', 'due_date', 'payment_date', 'created_at', 'updated_at']:
+        if invoice.get(field) and isinstance(invoice[field], str):
+            invoice[field] = datetime.fromisoformat(invoice[field])
+    
+    return Invoice(**invoice)
+
+@api_router.put("/invoices/{invoice_id}", response_model=Invoice)
+async def update_invoice(
+    invoice_id: str,
+    invoice_update: InvoiceUpdate,
+    current_user: AdminUser = Depends(get_current_user)
+):
+    """Update invoice"""
+    existing = await db.invoices.find_one({"id": invoice_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    
+    update_data = invoice_update.model_dump(exclude_unset=True)
+    
+    # Update amount in customer balance if changed
+    if 'amount' in update_data and update_data['amount'] != existing['amount']:
+        diff = update_data['amount'] - existing['amount']
+        await db.customers.update_one(
+            {"id": existing['customer_id']},
+            {"$inc": {"balance": -diff}}
+        )
+    
+    update_data['updated_at'] = datetime.now(timezone.utc).isoformat()
+    
+    # Convert datetime to ISO string
+    if 'due_date' in update_data and update_data['due_date']:
+        update_data['due_date'] = update_data['due_date'].isoformat()
+    
+    await db.invoices.update_one({"id": invoice_id}, {"$set": update_data})
+    
+    # Get updated invoice
+    updated = await db.invoices.find_one({"id": invoice_id}, {"_id": 0})
+    
+    # Convert datetime strings
+    for field in ['issue_date', 'due_date', 'payment_date', 'created_at', 'updated_at']:
+        if updated.get(field) and isinstance(updated[field], str):
+            updated[field] = datetime.fromisoformat(updated[field])
+    
+    return Invoice(**updated)
+
+@api_router.post("/invoices/{invoice_id}/pay", response_model=Invoice)
+async def pay_invoice(
+    invoice_id: str,
+    payment: PaymentCreate,
+    current_user: AdminUser = Depends(get_current_user)
+):
+    """Record payment for invoice"""
+    invoice = await db.invoices.find_one({"id": invoice_id}, {"_id": 0})
+    if not invoice:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    
+    if invoice['status'] == 'paid':
+        raise HTTPException(status_code=400, detail="Invoice already paid")
+    
+    # Update invoice
+    payment_date = datetime.now(timezone.utc)
+    await db.invoices.update_one(
+        {"id": invoice_id},
+        {"$set": {
+            "status": "paid",
+            "payment_date": payment_date.isoformat(),
+            "payment_method": payment.payment_method,
+            "updated_at": payment_date.isoformat()
+        }}
+    )
+    
+    # Update customer balance
+    await db.customers.update_one(
+        {"id": invoice['customer_id']},
+        {"$inc": {"balance": invoice['amount']}}
+    )
+    
+    # Create payment record
+    customer = await db.customers.find_one({"id": invoice['customer_id']}, {"_id": 0})
+    payment_obj = Payment(
+        customer_id=invoice['customer_id'],
+        customer_name=f"{customer['first_name']} {customer['last_name']}",
+        invoice_id=invoice_id,
+        invoice_number=invoice['invoice_number'],
+        amount=invoice['amount'],
+        payment_method=payment.payment_method,
+        payment_date=payment_date,
+        notes=payment.notes
+    )
+    
+    payment_doc = payment_obj.model_dump()
+    payment_doc['payment_date'] = payment_doc['payment_date'].isoformat()
+    payment_doc['created_at'] = payment_doc['created_at'].isoformat()
+    
+    await db.payments.insert_one(payment_doc)
+    
+    # Get updated invoice
+    updated = await db.invoices.find_one({"id": invoice_id}, {"_id": 0})
+    
+    # Convert datetime strings
+    for field in ['issue_date', 'due_date', 'payment_date', 'created_at', 'updated_at']:
+        if updated.get(field) and isinstance(updated[field], str):
+            updated[field] = datetime.fromisoformat(updated[field])
+    
+    return Invoice(**updated)
+
+@api_router.delete("/invoices/{invoice_id}")
+async def cancel_invoice(invoice_id: str, current_user: AdminUser = Depends(get_current_user)):
+    """Cancel invoice"""
+    invoice = await db.invoices.find_one({"id": invoice_id}, {"_id": 0})
+    if not invoice:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    
+    if invoice['status'] == 'paid':
+        raise HTTPException(status_code=400, detail="Cannot cancel paid invoice")
+    
+    # Update invoice status
+    await db.invoices.update_one(
+        {"id": invoice_id},
+        {"$set": {"status": "cancelled", "updated_at": datetime.now(timezone.utc).isoformat()}}
+    )
+    
+    # Update customer balance
+    await db.customers.update_one(
+        {"id": invoice['customer_id']},
+        {"$inc": {"balance": invoice['amount']}}
+    )
+    
+    return {"message": "Invoice cancelled successfully"}
+
+# ==================== PAYMENT ROUTES ====================
+
+@api_router.get("/payments", response_model=List[Payment])
+async def get_payments(
+    customer_id: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 50,
+    current_user: AdminUser = Depends(get_current_user)
+):
+    """Get payments list"""
+    query = {}
+    if customer_id:
+        query["customer_id"] = customer_id
+    
+    payments = await db.payments.find(query, {"_id": 0}).sort("payment_date", -1).skip(skip).limit(limit).to_list(None)
+    
+    # Convert datetime strings
+    for payment in payments:
+        for field in ['payment_date', 'created_at']:
+            if payment.get(field) and isinstance(payment[field], str):
+                payment[field] = datetime.fromisoformat(payment[field])
+    
+    return payments
+
+@api_router.post("/payments", response_model=Payment)
+async def create_direct_payment(payment: DirectPaymentCreate, current_user: AdminUser = Depends(get_current_user)):
+    """Create direct payment (not linked to invoice)"""
+    # Get customer info
+    customer = await db.customers.find_one({"id": payment.customer_id}, {"_id": 0})
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    
+    # Create payment
+    payment_obj = Payment(
+        customer_id=payment.customer_id,
+        customer_name=f"{customer['first_name']} {customer['last_name']}",
+        amount=payment.amount,
+        payment_method=payment.payment_method,
+        notes=payment.notes
+    )
+    
+    doc = payment_obj.model_dump()
+    doc['payment_date'] = doc['payment_date'].isoformat()
+    doc['created_at'] = doc['created_at'].isoformat()
+    
+    await db.payments.insert_one(doc)
+    
+    # Update customer balance
+    await db.customers.update_one(
+        {"id": payment.customer_id},
+        {"$inc": {"balance": payment.amount}}
+    )
+    
+    return payment_obj
+
 # ==================== INCLUDE ROUTER ====================
 
 app.include_router(api_router)
