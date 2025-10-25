@@ -579,6 +579,50 @@ class DirectPaymentCreate(BaseModel):
     payment_method: str
     notes: Optional[str] = None
 
+# ==================== DEVICE MODELS ====================
+
+class Device(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    device_type: str  # modem, router, ont, switch
+    brand: str
+    model: str
+    serial_number: str
+    mac_address: Optional[str] = None
+    status: str = "in_stock"  # in_stock, assigned, faulty, retired
+    customer_id: Optional[str] = None
+    customer_name: Optional[str] = None
+    assigned_date: Optional[datetime] = None
+    purchase_date: Optional[datetime] = None
+    purchase_price: Optional[float] = None
+    notes: Optional[str] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+class DeviceCreate(BaseModel):
+    device_type: str
+    brand: str
+    model: str
+    serial_number: str
+    mac_address: Optional[str] = None
+    purchase_date: Optional[datetime] = None
+    purchase_price: Optional[float] = None
+    notes: Optional[str] = None
+
+class DeviceUpdate(BaseModel):
+    device_type: Optional[str] = None
+    brand: Optional[str] = None
+    model: Optional[str] = None
+    serial_number: Optional[str] = None
+    mac_address: Optional[str] = None
+    status: Optional[str] = None
+    purchase_date: Optional[datetime] = None
+    purchase_price: Optional[float] = None
+    notes: Optional[str] = None
+
+class DeviceAssign(BaseModel):
+    customer_id: str
+
 # ==================== INVOICE ROUTES ====================
 
 @api_router.get("/invoices", response_model=List[Invoice])
